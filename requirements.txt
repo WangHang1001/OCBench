@@ -1,0 +1,11 @@
+torch>=2.5.0
+transformers>=4.57.0
+accelerate>=1.0.0
+vllm>=0.11.0
+qwen-vl-utils>=0.0.10
+huggingface_hub>=0.24.0
+requests>=2.31.0
+tqdm>=4.66.0
+safetensors>=0.4.0
+pillow>=10.0.0
+numpy>=1.24.0

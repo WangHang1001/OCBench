@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Runtime logs
+*.log
+
+# Large downloaded assets
+model/*
+dataset/*
+output/*
+checkpoint/*
+
+# Keep project directories visible in git
+!model/.gitkeep
+!dataset/.gitkeep
+!output/.gitkeep
+!checkpoint/.gitkeep
+
+# Common archives/checkpoints
+*.zip
+*.tar
+*.tar.gz
+*.safetensors
+*.bin
+*.pt
+*.pth
