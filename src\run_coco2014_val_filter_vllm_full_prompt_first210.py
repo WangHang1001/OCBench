@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run COCO2014 val image filtering with Qwen3-VL-235B and vLLM.
+"""Run first-210 COCO2014 val image filtering with Qwen3-VL-235B and vLLM.
 
 The script can start a local vLLM OpenAI-compatible server, send each COCO val
 image to the model, parse the model's JSON answer, and write one normalized
@@ -32,44 +32,284 @@ DEFAULT_DATA_ROOT = PROJECT_ROOT / "dataset" / "coco2014"
 DEFAULT_IMAGES_DIR = DEFAULT_DATA_ROOT / "val2014"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output"
 DEFAULT_CHECKPOINT_DIR = PROJECT_ROOT / "checkpoint"
-DEFAULT_OUTPUT_JSON = DEFAULT_OUTPUT_DIR / "coco2014_val_qwen3vl235b_selection.json"
-DEFAULT_CHECKPOINT_JSONL = DEFAULT_CHECKPOINT_DIR / "coco2014_val_qwen3vl235b_selection.jsonl"
+DEFAULT_OUTPUT_JSON = DEFAULT_OUTPUT_DIR / "coco2014_val_qwen3vl235b_selection_full_prompt_first210.json"
+DEFAULT_CHECKPOINT_JSONL = DEFAULT_CHECKPOINT_DIR / "coco2014_val_qwen3vl235b_selection_full_prompt_first210.jsonl"
 DEFAULT_MODEL_NAME = "Qwen3-VL-235B-A22B-Thinking"
+DEFAULT_LIMIT = 210
 
 ALLOWED_DIFFICULTY_TYPES = [
-    "complex scene",
     "large quantity",
+    "scale variation",
     "similar-object confusion",
     "similar background",
     "clustered stacking",
+    "occlusion or truncation",
 ]
 
-DEFAULT_PROMPT = """You are an expert visual dataset annotator. Your task is to determine whether the given image is suitable for constructing a challenging target-object counting question for LVLMs/MLLMs.
+DEFAULT_PROMPT = """You are an expert visual dataset annotator. Your task is to determine whether the given image is suitable for inclusion in a candidate image subset for a benchmark of challenging target-object counting for LVLMs/MLLMs.
 
-A valid image must satisfy BOTH conditions:
+This is an INITIAL FILTERING step before human review.
+Your goal is to keep images that are likely useful for constructing genuinely challenging counting questions, while rejecting images that are clearly easy, clearly invalid, or not reliably countable.
 
-Condition A: Basic requirement for object counting
-The image must contain at least one clearly nameable target object category or object group that can be counted. The target objects should appear at least twice in the image. A human should be able to reasonably design a question such as "How many [target objects] are in the image?"
+Important overall principle:
+A visually rich or cluttered image is NOT automatically a challenging counting image.
+Select an image only when at least one target object category is:
+1. a real physical object category;
+2. clearly nameable;
+3. present with at least two real instances;
+4. reliably countable by humans with a stable exact ground-truth count;
+5. not countable at a glance;
+6. difficult due to at least one specific target-level difficulty type listed below.
 
-Condition B: Difficult-scene requirement
-The image must satisfy at least one of the following five difficulty types:
+This is a candidate-generation stage, not the final benchmark construction stage.
+So keep images that are clearly or plausibly challenging and annotatable, but reject images that are obviously easy or whose exact count is not reliably annotatable.
 
-1. Complex scene: rich scene content, many object categories, scattered target objects, small targets, or inconspicuous target locations.
-2. Large quantity: many same-category target instances, with possible occlusion, overlap, or partial visibility.
-3. Similar-object confusion: visually similar objects from different categories may be confused with the target objects.
-4. Similar background: target objects are visually similar to the background, base, container, surface, or nearby region.
-5. Clustered stacking: same-category target objects are densely clustered, piled, stacked, or closely adjacent, making individual instances hard to separate.
+========================
+Step 1: Candidate target identification
+========================
 
-Selection rule:
-Set "selected" to true only if Condition A is satisfied and at least one difficulty type in Condition B is present.
+First identify one or more candidate target object categories that could reasonably be used in a counting question such as:
+“How many [target objects] are in the image?”
 
-Output JSON only:
+Evaluate each candidate target category independently.
+Do NOT transfer difficulty from one category to another.
+Only categories that are themselves challenging should be retained.
+
+========================
+Step 2: Basic validity requirements
+========================
+
+A candidate target category is valid only if ALL of the following hold:
+
+1. Real physical instance rule
+Count only real physical instances in the scene.
+Do NOT count reflections, mirror images, shadows, printed images, screen images, posters, paintings, or duplicated appearances as separate target instances.
+
+2. Minimum count rule
+The category must contain at least two real target instances.
+
+3. Semantic clarity rule
+The category must be semantically clear and visually consistent.
+Reject categories whose membership is ambiguous in the image.
+
+4. Annotatability rule
+The exact count must be reasonably and reliably annotatable by humans.
+If human annotators would likely disagree on the exact number, reject that target category.
+
+Reject the target category if:
+- instance boundaries are too unclear;
+- the category is mixed with similar object types and cannot be stably defined;
+- the count would depend on arbitrary judgment;
+- instances are too blurry, too tiny, too fragmented, too hidden, or too merged to support a stable exact count.
+
+Examples of often invalid targets when not clearly separable:
+- distant trees in a background forest;
+- blurry crowd-like background people;
+- fragmented basil leaves or herb toppings;
+- crumbs, grains, seeds, chopped food, grass, leaves, petals, or similar fragment-like objects;
+- ambiguous container-like categories such as baskets/containers/trays/bowls/racks when category boundaries are unclear.
+
+========================
+Step 3: Easy-count rejection
+========================
+
+Reject a candidate target category if the count is easy.
+
+At-a-glance rule:
+If an average human can count the target objects immediately without careful searching, careful separation, or category judgment, then the target is NOT challenging.
+
+Reject the target category if any of the following holds:
+- only 2 or 3 target instances, and they are large, salient, clearly visible, and countable at a glance;
+- the overall scene looks complex, but the target category itself is easy to count;
+- the only apparent difficulty comes from general background clutter or rich scene content;
+- the objects are regularly arranged and clearly separable;
+- the objects are stacked or adjacent but still clearly separable;
+- target and non-target objects are easy to distinguish.
+
+If an image contains both difficult and easy countable categories, keep only the difficult categories.
+
+========================
+Step 4: Allowed difficulty types
+========================
+
+Use ONLY the following difficulty types:
+
+1. large quantity
+2. scale variation
+3. similar-object confusion
+4. similar background
+5. clustered stacking
+6. occlusion or truncation
+
+A category is challenging only if at least one of these difficulty types directly affects counting that category.
+
+------------------------
+1. large quantity
+------------------------
+Use this when the target category contains many real, individually countable instances.
+
+Guidelines:
+- 2–3 instances: never large quantity
+- 4–5 instances: usually not large quantity
+- 6–9 instances: may be large quantity only if counting is not obvious and some additional difficulty exists
+- 10 or more instances: generally can be large quantity, if still reliably annotatable
+
+Do NOT use this type for:
+- blurry crowds,
+- indistinct background objects,
+- fragmented objects,
+- scenes where the exact count is not reliably annotatable.
+
+------------------------
+2. scale variation
+------------------------
+Use this when same-category target instances show substantial apparent-size variation, often due to perspective, depth, or distance.
+
+This type is especially relevant when:
+- some target instances are large/salient,
+- other target instances are much smaller or less salient,
+- the target instances are spatially distributed across different regions or depth levels,
+- the smaller instances are easy to miss,
+- exact counting requires careful whole-image search.
+
+Do NOT use this type merely because:
+- targets are small;
+- targets are spatially separated;
+- size differences are only mild;
+- the count is still obvious at a glance.
+
+Reject the target if the smallest instances are so tiny, blurry, or ambiguous that humans cannot reliably annotate the exact count.
+
+------------------------
+3. similar-object confusion
+------------------------
+Use this when visually similar NON-target objects create genuine ambiguity about whether they should be counted as target instances.
+
+The confusion must be real, not superficial.
+
+Do NOT use this type merely because:
+- target and non-target objects belong to the same broad superclass (e.g. both are people, animals, vehicles, or food),
+- non-target objects are clearly distinguishable by clothing, role, equipment, color, shape, position, or context.
+
+Example:
+A clearly dressed referee should usually NOT be treated as a confusing distractor for baseball players.
+
+------------------------
+4. similar background
+------------------------
+Use this when the target instances blend into their immediate surrounding background, supporting surface, or nearby region due to similar color, brightness, texture, or boundary appearance, making them easy to miss or hard to separate.
+
+Do NOT use this type merely because:
+- the whole image is grayscale, monochrome, low-saturation, or stylized;
+- the target and background share a similar color but the target still has clear contours, shadows, or strong local contrast;
+- the target forms a clear silhouette.
+
+If the target remains clearly visible and countable at a glance, do NOT use this type.
+
+------------------------
+5. clustered stacking
+------------------------
+Use this when same-category target instances are densely packed, piled, stacked, touching, overlapping, or visually merged in a way that makes individual instances hard to separate and count.
+
+The key is genuine instance-separation difficulty.
+
+Do NOT use this type for:
+- simple adjacency,
+- side-by-side people,
+- regular rows/columns/grids,
+- clear stacking where each object still has visible edges, distinct layers, or obvious boundaries.
+
+Reject the target if the stacking is so severe that humans cannot reliably determine the exact count.
+
+------------------------
+6. occlusion or truncation
+------------------------
+Use this when target instances are partially hidden by non-target objects, scene elements, or image boundaries, and that partial visibility makes target identification or exact counting genuinely difficult.
+
+Use this type only when:
+- enough visual evidence remains for humans to infer a stable exact count,
+- but the partial visibility still makes counting meaningfully difficult.
+
+Do NOT use this type if:
+- the target is still clearly identifiable and countable at a glance,
+- the occlusion/truncation is too mild to matter.
+
+Reject the target if:
+- so little visual evidence remains that humans cannot reliably determine the exact count.
+
+Distinguish this from clustered stacking:
+- use "occlusion or truncation" when the main difficulty is partial visibility caused by non-target objects, scene elements, or image boundaries;
+- use "clustered stacking" when the main difficulty is separation among multiple same-category target instances.
+
+Both labels may be used only if both independently contribute to the difficulty.
+
+========================
+Step 5: Key veto rules
+========================
+
+The following veto rules override all difficulty types:
+
+1. easy-count veto
+Reject if the target count is obvious at a glance.
+
+2. reflection / duplicate-appearance veto
+Reject if the apparent difficulty comes mainly from reflections, mirror images, shadows, screen images, posters, or other duplicated appearances rather than real additional physical instances.
+
+3. unannotatable-target veto
+Reject if humans would likely disagree on the exact count.
+
+4. semantic-ambiguity veto
+Reject if it is unclear which objects belong to the target category.
+
+5. regular-layout veto
+Reject if targets are regularly arranged and clearly separable.
+
+6. clear-stacking veto
+Reject if targets are stacked or overlapping but still clearly separable.
+
+7. easy-distinction veto
+Reject if target and non-target objects are easy to distinguish.
+
+8. background-complexity veto
+Reject if the overall scene is complex but the target category itself remains easy to count.
+
+9. fragmented-object veto
+Reject fragment-like or topping-like categories if they are not complete, clearly separated, and consistently countable.
+
+========================
+Step 6: Final selection rule
+========================
+
+Set "selected" to true only if the image contains at least one target category that:
+
+1. satisfies the basic validity requirements;
+2. has at least two real physical instances;
+3. is not easy to count at a glance;
+4. is not rejected by any veto rule;
+5. has at least one valid difficulty type that directly affects counting that target category.
+
+This is an initial candidate selection stage before human review.
+So if a target category appears to be genuinely challenging and reliably annotatable, it is acceptable to keep it even if the case is not absolutely extreme.
+
+However, when a case is clearly easy or clearly not reliably annotatable, reject it.
+
+========================
+Output format
+========================
+
+Output JSON only. Do not include markdown or extra explanation.
+
+Use this exact structure:
 
 {
   "selected": true/false,
-  "target_objects": ["..."],
-  "difficulty_types": ["complex scene", "large quantity", "similar-object confusion", "similar background", "clustered stacking"],
-  "brief_reason": "..."
+  "final_selected_targets": ["..."],
+  "difficulty_types_by_target": {
+    "...": ["large quantity", "scale variation", "similar-object confusion", "similar background", "clustered stacking", "occlusion or truncation"]
+  },
+  "rejected_targets": ["..."],
+  "selection_confidence": "high/medium/low",
+  "brief_reason": "brief explanation"
 }"""
 
 
@@ -91,7 +331,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retry-base-delay", type=float, default=2.0)
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     parser.add_argument("--start-after", default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--record-errors", action="store_true")
@@ -282,39 +522,84 @@ def parse_model_json(text: str) -> Dict[str, Any]:
 
 def normalize_record(image_id: str, model_data: Dict[str, Any]) -> Dict[str, Any]:
     selected = bool(model_data.get("selected", False))
-    target_objects = model_data.get("target_objects", [])
-    if isinstance(target_objects, str):
-        target_objects = [target_objects]
-    if not isinstance(target_objects, list):
-        target_objects = []
-    target_objects = [str(x).strip() for x in target_objects if str(x).strip()]
 
-    difficulty_types = model_data.get("difficulty_types", [])
-    if isinstance(difficulty_types, str):
-        difficulty_types = [difficulty_types]
-    if not isinstance(difficulty_types, list):
-        difficulty_types = []
+    final_selected_targets = model_data.get("final_selected_targets", [])
+    if isinstance(final_selected_targets, str):
+        final_selected_targets = [final_selected_targets]
+    if not isinstance(final_selected_targets, list):
+        final_selected_targets = []
+    final_selected_targets = [str(x).strip() for x in final_selected_targets if str(x).strip()]
+
+    raw_difficulty_map = model_data.get("difficulty_types_by_target", {})
+    if not isinstance(raw_difficulty_map, dict):
+        raw_difficulty_map = {}
+
     allowed = {x.lower(): x for x in ALLOWED_DIFFICULTY_TYPES}
-    normalized_difficulties = []
-    for item in difficulty_types:
-        key = str(item).strip().lower()
-        if key in allowed and allowed[key] not in normalized_difficulties:
-            normalized_difficulties.append(allowed[key])
+    difficulty_types_by_target: Dict[str, List[str]] = {}
+    for target, raw_types in raw_difficulty_map.items():
+        target_name = str(target).strip()
+        if not target_name:
+            continue
+        if isinstance(raw_types, str):
+            raw_types = [raw_types]
+        if not isinstance(raw_types, list):
+            raw_types = []
+        normalized_types = []
+        for item in raw_types:
+            key = str(item).strip().lower()
+            if key in allowed and allowed[key] not in normalized_types:
+                normalized_types.append(allowed[key])
+        if normalized_types:
+            difficulty_types_by_target[target_name] = normalized_types
+
+    if selected and not final_selected_targets:
+        final_selected_targets = list(difficulty_types_by_target.keys())
+
+    if selected:
+        final_selected_targets = [
+            target
+            for target in final_selected_targets
+            if target in difficulty_types_by_target
+        ]
+        difficulty_types_by_target = {
+            target: difficulty_types_by_target[target]
+            for target in final_selected_targets
+        }
+        if not final_selected_targets:
+            selected = False
 
     brief_reason = model_data.get("brief_reason", "")
     if not isinstance(brief_reason, str):
         brief_reason = json.dumps(brief_reason, ensure_ascii=False)
     brief_reason = " ".join(brief_reason.split())[:1000]
 
-    if selected and not normalized_difficulties:
+    rejected_targets = model_data.get("rejected_targets", [])
+    if isinstance(rejected_targets, str):
+        rejected_targets = [rejected_targets]
+    if not isinstance(rejected_targets, list):
+        rejected_targets = []
+    rejected_targets = [str(x).strip() for x in rejected_targets if str(x).strip()]
+
+    selection_confidence = str(model_data.get("selection_confidence", "low")).strip().lower()
+    if selection_confidence not in {"high", "medium", "low"}:
+        selection_confidence = "low"
+
+    if not selected and final_selected_targets:
+        final_selected_targets = []
+        difficulty_types_by_target = {}
+    if selected and selection_confidence == "low":
         selected = False
-        brief_reason = (brief_reason + " ").strip() + "Normalized to false because no valid difficulty type was returned."
+        brief_reason = (brief_reason + " ").strip() + "Normalized to false because selected targets were returned with low confidence."
+        final_selected_targets = []
+        difficulty_types_by_target = {}
 
     return {
         "image_id": image_id,
         "selected": selected,
-        "target_objects": target_objects,
-        "difficulty_types": normalized_difficulties,
+        "final_selected_targets": final_selected_targets,
+        "difficulty_types_by_target": difficulty_types_by_target,
+        "rejected_targets": rejected_targets,
+        "selection_confidence": selection_confidence,
         "brief_reason": brief_reason,
     }
 
@@ -323,8 +608,10 @@ def error_record(image_id: str, message: str) -> Dict[str, Any]:
     return {
         "image_id": image_id,
         "selected": False,
-        "target_objects": [],
-        "difficulty_types": [],
+        "final_selected_targets": [],
+        "difficulty_types_by_target": {},
+        "rejected_targets": [],
+        "selection_confidence": "low",
         "brief_reason": f"ERROR: {message}"[:1000],
     }
 
