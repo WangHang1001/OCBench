@@ -151,12 +151,12 @@ Each record has this format:
 {
   "image_id": "COCO_val2014_000000000042.jpg",
   "selected": true,
+  "logprob": -0.0123,
   "final_selected_targets": ["..."],
   "difficulty_types_by_target": {
     "...": ["large quantity", "scale variation"]
   },
   "rejected_targets": ["..."],
-  "selection_confidence": "high",
   "brief_reason": "..."
 }
 ```

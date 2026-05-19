@@ -105,7 +105,6 @@ Output JSON only:
     "...": ["large quantity", "scale variation", "similar-object confusion", "similar background", "clustered stacking", "occlusion or truncation"]
   },
   "rejected_targets": ["..."],
-  "selection_confidence": "high/medium/low",
   "brief_reason": "..."
 }"""
 
@@ -128,6 +127,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retry-base-delay", type=float, default=2.0)
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--no-logprobs", action="store_true", help="Disable selected true/false token logprob collection.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--start-after", default=None)
     parser.add_argument("--overwrite", action="store_true")
@@ -274,7 +274,7 @@ def image_to_data_url(image_path: Path) -> str:
 
 
 def build_payload(args: argparse.Namespace, prompt: str, image_path: Path) -> Dict[str, Any]:
-    return {
+    payload = {
         "model": args.model_name,
         "messages": [
             {
@@ -288,6 +288,9 @@ def build_payload(args: argparse.Namespace, prompt: str, image_path: Path) -> Di
         "temperature": args.temperature,
         "max_tokens": args.max_tokens,
     }
+    if not args.no_logprobs:
+        payload["logprobs"] = True
+    return payload
 
 
 def request_headers(args: argparse.Namespace) -> Dict[str, str]:
@@ -317,8 +320,74 @@ def parse_model_json(text: str) -> Dict[str, Any]:
         return json.loads(text[start : end + 1])
 
 
-def normalize_record(image_id: str, model_data: Dict[str, Any]) -> Dict[str, Any]:
-    selected = bool(model_data.get("selected", False))
+def normalize_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+    return bool(value)
+
+
+def decode_logprob_token(token_data: Dict[str, Any], prefer_bytes: bool) -> str:
+    if prefer_bytes:
+        raw_bytes = token_data.get("bytes")
+        if isinstance(raw_bytes, list):
+            try:
+                return bytes(int(x) for x in raw_bytes).decode("utf-8", errors="replace")
+            except (TypeError, ValueError):
+                pass
+    token = token_data.get("token", "")
+    return token if isinstance(token, str) else str(token)
+
+
+def selected_value_logprob(response_json: Dict[str, Any]) -> Optional[float]:
+    choices = response_json.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    logprobs = choices[0].get("logprobs")
+    if not isinstance(logprobs, dict):
+        return None
+    content = logprobs.get("content")
+    if not isinstance(content, list) or not content:
+        return None
+
+    selected_re = re.compile(r'"selected"\s*:\s*(true|false)\b', flags=re.IGNORECASE)
+    for prefer_bytes in (True, False):
+        spans = []
+        parts = []
+        cursor = 0
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            token_text = decode_logprob_token(item, prefer_bytes)
+            start = cursor
+            cursor += len(token_text)
+            spans.append((start, cursor, item))
+            parts.append(token_text)
+
+        text = "".join(parts)
+        match = selected_re.search(text)
+        if not match:
+            continue
+
+        value_start, value_end = match.span(1)
+        token_logprobs = []
+        for start, end, item in spans:
+            if start < value_end and end > value_start:
+                token_logprob = item.get("logprob")
+                if isinstance(token_logprob, (int, float)):
+                    token_logprobs.append(float(token_logprob))
+        if token_logprobs:
+            return sum(token_logprobs)
+    return None
+
+
+def normalize_record(image_id: str, model_data: Dict[str, Any], logprob: Optional[float] = None) -> Dict[str, Any]:
+    selected = normalize_bool(model_data.get("selected", False))
 
     final_selected_targets = model_data.get("final_selected_targets", [])
     if isinstance(final_selected_targets, str):
@@ -352,7 +421,7 @@ def normalize_record(image_id: str, model_data: Dict[str, Any]) -> Dict[str, Any
     if selected and not final_selected_targets:
         final_selected_targets = list(difficulty_types_by_target.keys())
 
-    if selected:
+    if selected and final_selected_targets:
         final_selected_targets = [
             target
             for target in final_selected_targets
@@ -362,8 +431,6 @@ def normalize_record(image_id: str, model_data: Dict[str, Any]) -> Dict[str, Any
             target: difficulty_types_by_target[target]
             for target in final_selected_targets
         }
-        if not final_selected_targets:
-            selected = False
 
     brief_reason = model_data.get("brief_reason", "")
     if not isinstance(brief_reason, str):
@@ -377,26 +444,16 @@ def normalize_record(image_id: str, model_data: Dict[str, Any]) -> Dict[str, Any
         rejected_targets = []
     rejected_targets = [str(x).strip() for x in rejected_targets if str(x).strip()]
 
-    selection_confidence = str(model_data.get("selection_confidence", "low")).strip().lower()
-    if selection_confidence not in {"high", "medium", "low"}:
-        selection_confidence = "low"
-
     if not selected and final_selected_targets:
         final_selected_targets = []
         difficulty_types_by_target = {}
-    if selected and selection_confidence == "low":
-        selected = False
-        brief_reason = (brief_reason + " ").strip() + "Normalized to false because selected targets were returned with low confidence."
-        final_selected_targets = []
-        difficulty_types_by_target = {}
-
     return {
         "image_id": image_id,
         "selected": selected,
+        "logprob": logprob,
         "final_selected_targets": final_selected_targets,
         "difficulty_types_by_target": difficulty_types_by_target,
         "rejected_targets": rejected_targets,
-        "selection_confidence": selection_confidence,
         "brief_reason": brief_reason,
     }
 
@@ -405,10 +462,10 @@ def error_record(image_id: str, message: str) -> Dict[str, Any]:
     return {
         "image_id": image_id,
         "selected": False,
+        "logprob": None,
         "final_selected_targets": [],
         "difficulty_types_by_target": {},
         "rejected_targets": [],
-        "selection_confidence": "low",
         "brief_reason": f"ERROR: {message}"[:1000],
     }
 
@@ -441,8 +498,9 @@ def annotate_image(image_path: Path, prompt: str, args: argparse.Namespace, sess
                     sleep_before_retry(args.retry_base_delay, attempt, response)
                     continue
                 raise AnnotationError(last_error)
-            model_data = parse_model_json(extract_message_text(response.json()))
-            return normalize_record(image_path.name, model_data)
+            response_json = response.json()
+            model_data = parse_model_json(extract_message_text(response_json))
+            return normalize_record(image_path.name, model_data, selected_value_logprob(response_json))
         except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError, AnnotationError) as exc:
             last_error = str(exc)
             if attempt >= args.max_retries:
