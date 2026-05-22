@@ -142,6 +142,7 @@ checkpoint/coco2014_val_qwen3vl235b_selection_full_prompt.jsonl
 
 The run can be resumed with the same command; processed image ids in the checkpoint will be skipped.
 Adjust `--workers` if the vLLM server becomes unstable or GPU utilization is too low.
+Per-image API or JSON parsing failures are recorded as `selected=false`, `logprob=null`, and `brief_reason="ERROR: ..."`, then the run continues. Use `--fail-on-error` only when debugging.
 
 ## Output Format
 

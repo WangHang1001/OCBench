@@ -132,7 +132,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     parser.add_argument("--start-after", default=None)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--record-errors", action="store_true")
+    parser.add_argument("--record-errors", action="store_true", default=True, help="Record per-image errors and continue. This is the default.")
+    parser.add_argument("--fail-on-error", action="store_true", help="Stop the run when a single image fails.")
     parser.add_argument("--export-only", action="store_true")
 
     parser.add_argument("--host", default="127.0.0.1")
@@ -544,7 +545,7 @@ def run_serial(images: Sequence[Path], prompt: str, args: argparse.Namespace) ->
         try:
             record = annotate_image(image_path, prompt, args, session)
         except AnnotationError as exc:
-            if not args.record_errors:
+            if args.fail_on_error:
                 raise
             record = error_record(image_path.name, str(exc))
         append_jsonl(args.checkpoint_jsonl, record)
@@ -559,7 +560,7 @@ def run_parallel(images: Sequence[Path], prompt: str, args: argparse.Namespace) 
             try:
                 record = future.result()
             except AnnotationError as exc:
-                if not args.record_errors:
+                if args.fail_on_error:
                     raise
                 record = error_record(image_path.name, str(exc))
             append_jsonl(args.checkpoint_jsonl, record)
